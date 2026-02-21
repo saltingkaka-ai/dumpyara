@@ -52,7 +52,7 @@ jobs:
 
       - name: Install Python packages
         run: |
-          pip install aospdtgen dumpyara gdown
+          pip install aospdtgen dumpyara
 
       - name: Extract File ID and Setup Service Account
         id: setup
@@ -75,40 +75,25 @@ jobs:
           echo "File ID: $FILE_ID"
           
           # Setup Service Account
-          echo '${{ secrets.GDRIVE_SERVICE_ACCOUNT }}' | base64 -d > /tmp/service_account.json
+          echo '${{ secrets.GDRIVE_SERVICE_ACCOUNT }}' | base64 -d > /tmp/sa.json
           
-          if [ ! -s /tmp/service_account.json ]; then
+          if [ ! -s /tmp/sa.json ]; then
             echo "Error: Service account empty or not configured"
             exit 1
           fi
           
           echo "Service account configured"
 
-      - name: Install gdrive
-        run: |
-          wget -q https://github.com/gdrive-org/gdrive/releases/download/2.1.1/gdrive-linux-x64 -O /tmp/gdrive
-          chmod +x /tmp/gdrive
-          sudo mv /tmp/gdrive /usr/local/bin/
-
-      - name: Setup gdrive with Service Account
-        run: |
-          echo '${{ secrets.GDRIVE_SERVICE_ACCOUNT }}' | base64 -d > /tmp/sa.json
-          # gdrive menggunakan environment variable
-          export GOOGLE_SERVICE_ACCOUNT=/tmp/sa.json
-
       - name: Install rclone
         run: |
           curl https://rclone.org/install.sh | sudo bash
 
-      - name: Setup rclone with Service Account
+      - name: Setup rclone config
         run: |
           mkdir -p ~/.config/rclone
           
-          # Decode service account
-          echo '${{ secrets.GDRIVE_SERVICE_ACCOUNT }}' | base64 -d > /tmp/sa.json
-          
-          # Buat config rclone
-          cat > ~/.config/rclone/rclone.conf << 'EOF'
+          # Buat config rclone dengan service account
+          cat > ~/.config/rclone/rclone.conf << EOF
           [gdrive]
           type = drive
           scope = drive.readonly
@@ -119,19 +104,19 @@ jobs:
         run: |
           FILE_ID="${{ env.FILE_ID }}"
           
-          # Download
-          rclone copy "gdrive:${FILE_ID}" . -v
-    
-          # Rename
-          mv "${FILE_ID}" firmware.zip 2>/dev/null || ls -la
+          # Download file by ID menggunakan copyurl (lebih reliable untuk single file)
+          rclone copyurl "https://drive.google.com/uc?id=${FILE_ID}&export=download" firmware.zip -v --auto-filename=false
+          
+          # Cek hasil
+          ls -lh firmware.zip
 
       - name: Verify download
         run: |
-          ls -lh *.zip || ls -la
+          ls -lh firmware.zip || ls -la
           FILE_SIZE=$(stat -c%s firmware.zip 2>/dev/null || echo 0)
           if [ "$FILE_SIZE" -lt 1000000 ]; then
-          echo "Error: File too small"
-          exit 1
+            echo "Error: File too small"
+            exit 1
           fi
           echo "FILENAME=firmware.zip" >> $GITHUB_ENV
 
@@ -161,4 +146,4 @@ jobs:
         run: |
           rm -f firmware.zip 2>/dev/null || true
           rm -rf extracted_firmware 2>/dev/null || true
-          rm -f /tmp/lpunpack.py /tmp/service_account.json 2>/dev/null || true
+          rm -f /tmp/lpunpack.py /tmp/sa.json 2>/dev/null || true
