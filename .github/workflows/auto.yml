@@ -1,4 +1,4 @@
-name: Android Firmware Extraction (Pixeldrain Only)
+name: Android Firmware Extraction with Super Partition Unpack
 
 on:
   workflow_dispatch:
@@ -48,6 +48,8 @@ jobs:
           curl -L https://raw.githubusercontent.com/unix3dgforce/lpunpack/refs/heads/master/lpunpack.py -o /tmp/lpunpack.py
           chmod +x /tmp/lpunpack.py
           sudo ln -sf /tmp/lpunpack.py /usr/local/bin/lpunpack
+          # Verifikasi
+          python3 /tmp/lpunpack.py --help | head -3 || true
 
       - name: Install Python packages
         run: |
@@ -80,34 +82,131 @@ jobs:
           # Minimal 100MB untuk firmware valid
           if [ "$SIZE" -lt 100000000 ]; then
               echo "ERROR: File too small, likely not a firmware ($SIZE bytes)"
-              echo "Content preview:"
-              head -c 500 firmware.zip | strings || true
               exit 1
           fi
           
           # Cek bukan HTML error
           if head -c 200 firmware.zip | strings | grep -qiE "<html|error|not.found"; then
               echo "ERROR: Downloaded HTML error page"
-              head -c 1000 firmware.zip | strings | head -10
               exit 1
           fi
           
           echo "FILENAME=firmware.zip" >> $GITHUB_ENV
           echo "✓ Firmware download successful!"
 
-      - name: Extract firmware with dumpyara
+      - name: Extract firmware with dumpyara (Step 1)
         run: |
-          echo "Extracting firmware..."
+          echo "Step 1: Extracting firmware with dumpyara..."
           python3 -m dumpyara "${{ env.FILENAME }}" -o extracted_firmware -v
+          
+          echo ""
+          echo "Contents of extracted_firmware:"
+          ls -lh extracted_firmware/ || true
+          
+          # Cari super.img di berbagai lokasi
+          echo ""
+          echo "Searching for super.img..."
+          find extracted_firmware -name "super.img" -type f 2>/dev/null || true
+
+      - name: Process super.img - Convert sparse to raw and unpack
+        id: process_super
+        run: |
+          echo "Step 2: Processing super.img..."
+          
+          # Cari super.img di hasil extract dumpyara
+          SUPER_IMG=extracted_firmware/super.img
+          
+          if [ -z "$SUPER_IMG" ]; then
+              echo "WARNING: super.img not found in extracted firmware"
+              echo "Checking raw_images temp folder..."
+              SUPER_IMG=$(find . -path "./extracted_firmware/temp*" -name "super.img" 2>/dev/null | head -1)
+          fi
+          
+          if [ -z "$SUPER_IMG" ]; then
+              echo "ERROR: super.img not found anywhere"
+              echo "Available .img files:"
+              find extracted_firmware -name "*.img" 2>/dev/null || true
+              exit 1
+          fi
+          
+          echo "Found super.img at: $SUPER_IMG"
+          ls -lh "$SUPER_IMG"
+          
+          # Buat folder untuk hasil lpunpack
+          mkdir -p super_unpacked
+          
+          # Step 2a: Convert sparse ke raw dengan simg2img
+          echo ""
+          echo "Step 2a: Converting sparse super.img to raw (simg2img)..."
+          simg2img "$SUPER_IMG" super.img.raw
+          
+          if [ ! -f super.img.raw ]; then
+              echo "ERROR: Failed to create super.img.raw"
+              exit 1
+          fi
+          
+          echo "Raw image created:"
+          ls -lh super.img.raw
+          
+          # Step 2b: Unpack super.img.raw dengan lpunpack
+          echo ""
+          echo "Step 2b: Unpacking super.img.raw with lpunpack..."
+          python3 /tmp/lpunpack.py super.img.raw super_unpacked/
+          
+          # Cek hasil lpunpack
+          echo ""
+          echo "Contents of super_unpacked:"
+          ls -lh super_unpacked/ || true
+          
+          # Verifikasi ada partisi yang ter-extract
+          PARTITION_COUNT=$(ls super_unpacked/*.img 2>/dev/null | wc -l)
+          echo "Extracted partitions: $PARTITION_COUNT"
+          
+          if [ "$PARTITION_COUNT" -eq 0 ]; then
+              echo "WARNING: No partitions found in super_unpacked"
+              echo "Trying alternative lpunpack method..."
+              
+              # Coba dengan command berbeda
+              rm -rf super_unpacked/*
+              python3 /tmp/lpunpack.py super.img.raw ./super_unpacked/ || true
+              
+              PARTITION_COUNT=$(ls super_unpacked/*.img 2>/dev/null | wc -l)
+              echo "Retry extracted partitions: $PARTITION_COUNT"
+          fi
+          
+          # Copy partisi dari super_unpacked ke extracted_firmware untuk aospdtgen
+          echo ""
+          echo "Copying extracted partitions to firmware folder..."
+          for img in super_unpacked/*.img; do
+              if [ -f "$img" ]; then
+                  PART_NAME=$(basename "$img")
+                  echo "  Copying: $PART_NAME"
+                  cp -v "$img" "extracted_firmware/$PART_NAME" || true
+              fi
+          done
+          
+          echo ""
+          echo "Final contents of extracted_firmware:"
+          ls -lh extracted_firmware/*.img 2>/dev/null | head -20 || true
 
       - name: Generate device tree with aospdtgen
         run: |
           OUTPUT="${{ github.event.inputs.OUTPUT_DIR }}"
           
-          echo "Generating device tree..."
+          echo "Step 3: Generating device tree..."
+          echo "Input: extracted_firmware/"
+          echo "Output: $OUTPUT/"
+          
+          # List partisi yang tersedia
+          echo ""
+          echo "Available partitions for aospdtgen:"
+          ls -1 extracted_firmware/*.img 2>/dev/null | xargs -n1 basename -s .img || true
+          
           if [ "${{ github.event.inputs.NO_PROPRIETARY }}" == "true" ]; then
+            echo "Running: aospdtgen --no-proprietary-files"
             python -m aospdtgen --no-proprietary-files -o "$OUTPUT" extracted_firmware/
           else
+            echo "Running: aospdtgen (with proprietary files)"
             python -m aospdtgen -o "$OUTPUT" extracted_firmware/
           fi
 
@@ -118,18 +217,29 @@ jobs:
           path: ${{ github.event.inputs.OUTPUT_DIR }}/
           retention-days: 3
 
+      - name: Upload super unpacked artifact (optional)
+        uses: actions/upload-artifact@v4
+        with:
+          name: super-unpacked-${{ github.run_number }}
+          path: super_unpacked/
+          retention-days: 1
+
       - name: Show results
         if: success()
         run: |
           echo "========================================"
           echo "✓ SUCCESS!"
-          echo "Device tree generated in: ${{ github.event.inputs.OUTPUT_DIR }}/"
-          echo "Download artifact from: Actions → This run → Artifacts"
+          echo ""
+          echo "Artifacts:"
+          echo "  1. device-tree-${{ github.run_number }}: Generated device tree"
+          echo "  2. super-unpacked-${{ github.run_number }}: Raw partitions from super.img"
+          echo ""
+          echo "Download from: Actions → This run → Artifacts"
           echo "========================================"
 
       - name: Cleanup
         if: always()
         run: |
-          rm -f firmware.zip 2>/dev/null || true
-          rm -rf extracted_firmware 2>/dev/null || true
+          rm -f firmware.zip super.img.raw 2>/dev/null || true
+          rm -rf extracted_firmware super_unpacked 2>/dev/null || true
           rm -f /tmp/lpunpack.py 2>/dev/null || true
