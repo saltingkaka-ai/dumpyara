@@ -28,16 +28,24 @@ def get_sevenzip_command():
 		_cached_executable = P7ZIP_EXECUTABLE
 		return P7ZIP_EXECUTABLE
 	else:
-		raise RuntimeError("You need 7-zip or p7zip installed to use this feature")
+		# Jangan raise error, return None saja
+		LOGW("7-zip not found, will skip 7z extraction")
+		return None
 
 def sevenzip(commands: List[str]):
+	cmd = get_sevenzip_command()
+	if not cmd:
+		raise RuntimeError("7-zip not available")
 	return check_output(
-		[get_sevenzip_command(), *commands],
+		[cmd, *commands],
 		stderr=STDOUT
 	)
 
 def unpack_sevenzip(filename: str, work_dir: str):
 	sevenzip_command = get_sevenzip_command()
+	
+	if not sevenzip_command:
+		raise RuntimeError("7-zip not available for extraction")
 
 	args = ["x", filename, "-y", f"-o{work_dir}/"]
 	if sevenzip_command == SEVEN_ZIP_EXECUTABLE:
