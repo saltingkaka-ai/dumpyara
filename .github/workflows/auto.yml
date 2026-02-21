@@ -96,9 +96,44 @@ jobs:
           # gdrive menggunakan environment variable
           export GOOGLE_SERVICE_ACCOUNT=/tmp/sa.json
 
-      - name: Download with gdrive
+      - name: Install rclone
         run: |
-          gdrive download "${{ env.FILE_ID }}" --stdout > firmware.zip
+          curl https://rclone.org/install.sh | sudo bash
+
+      - name: Setup rclone with Service Account
+        run: |
+          mkdir -p ~/.config/rclone
+          
+          # Decode service account
+          echo '${{ secrets.GDRIVE_SERVICE_ACCOUNT }}' | base64 -d > /tmp/sa.json
+          
+          # Buat config rclone
+          cat > ~/.config/rclone/rclone.conf << 'EOF'
+          [gdrive]
+          type = drive
+          scope = drive.readonly
+          service_account_file = /tmp/sa.json
+          EOF
+
+      - name: Download with rclone
+        run: |
+          FILE_ID="${{ env.FILE_ID }}"
+          
+          # Download
+          rclone copy "gdrive:${FILE_ID}" . -v
+    
+          # Rename
+          mv "${FILE_ID}" firmware.zip 2>/dev/null || ls -la
+
+      - name: Verify download
+        run: |
+          ls -lh *.zip || ls -la
+          FILE_SIZE=$(stat -c%s firmware.zip 2>/dev/null || echo 0)
+          if [ "$FILE_SIZE" -lt 1000000 ]; then
+          echo "Error: File too small"
+          exit 1
+          fi
+          echo "FILENAME=firmware.zip" >> $GITHUB_ENV
 
       - name: Extract firmware with dumpyara
         run: |
