@@ -17,6 +17,10 @@ on:
         required: false
         default: false
         type: boolean
+      PIXELDRAIN_ID:
+        description: 'Pixeldrain ID (fallback if GDrive fails)'
+        required: false
+        type: string
 
 jobs:
   extract-and-generate:
@@ -47,19 +51,16 @@ jobs:
           curl -L https://raw.githubusercontent.com/unix3dgforce/lpunpack/refs/heads/master/lpunpack.py -o /tmp/lpunpack.py
           chmod +x /tmp/lpunpack.py
           sudo ln -sf /tmp/lpunpack.py /usr/local/bin/lpunpack
-          # Test
-          python3 /tmp/lpunpack.py --help | head -3 || true
 
       - name: Install Python packages
         run: |
-          pip install aospdtgen dumpyara
+          pip install aospdtgen dumpyara gdown google-auth google-auth-oauthlib requests
 
-      - name: Extract File ID and Setup Service Account
-        id: setup
+      - name: Extract File ID
+        id: extract
         run: |
           GDRIVE_LINK="${{ github.event.inputs.LINK_GDRIVE }}"
           
-          # Extract File ID
           if [[ $GDRIVE_LINK =~ /file/d/([a-zA-Z0-9_-]+) ]]; then
             FILE_ID="${BASH_REMATCH[1]}"
           elif [[ $GDRIVE_LINK =~ id=([a-zA-Z0-9_-]+) ]]; then
@@ -67,58 +68,241 @@ jobs:
           elif [[ $GDRIVE_LINK =~ /d/([a-zA-Z0-9_-]+) ]]; then
             FILE_ID="${BASH_REMATCH[1]}"
           else
-            echo "Error: Could not extract file ID from link"
+            echo "Error: Could not extract file ID"
             exit 1
           fi
           
           echo "FILE_ID=$FILE_ID" >> $GITHUB_ENV
           echo "File ID: $FILE_ID"
-          
-          # Setup Service Account
-          echo '${{ secrets.GDRIVE_SERVICE_ACCOUNT }}' | base64 -d > /tmp/sa.json
-          
-          if [ ! -s /tmp/sa.json ]; then
-            echo "Error: Service account empty or not configured"
-            exit 1
-          fi
-          
-          echo "Service account configured"
 
-      - name: Install rclone
+      - name: Method 1 - Python Google Auth with Export
+        id: method1
+        continue-on-error: true
         run: |
+          echo "=== Trying Method 1: Python Google Auth ==="
+          
+          python3 << 'PYEOF'
+          import json
+          import base64
+          import requests
+          import os
+          import re
+          from google.oauth2 import service_account
+          from google.auth.transport.requests import Request
+          
+          sa_b64 = "${{ secrets.GDRIVE_SERVICE_ACCOUNT }}"
+          file_id = "${{ env.FILE_ID }}"
+          
+          try:
+              # Decode service account
+              sa_json = base64.b64decode(sa_b64)
+              sa_data = json.loads(sa_json)
+              
+              # Save temp
+              with open('/tmp/sa.json', 'w') as f:
+                  json.dump(sa_data, f)
+              
+              # Auth
+              credentials = service_account.Credentials.from_service_account_info(
+                  sa_data,
+                  scopes=['https://www.googleapis.com/auth/drive.readonly']
+              )
+              credentials.refresh(Request())
+              
+              # Download dengan confirm token handling
+              session = requests.Session()
+              headers = {"Authorization": f"Bearer {credentials.token}"}
+              
+              # Step 1: Get confirm token
+              url1 = f"https://drive.google.com/uc?id={file_id}&export=download"
+              response1 = session.get(url1, headers=headers, stream=True, allow_redirects=True)
+              
+              # Check for virus scan warning
+              confirm_token = None
+              for key, value in response1.cookies.items():
+                  if key.startswith("download_warning"):
+                      confirm_token = value
+                      break
+              
+              # Check HTML content for confirm
+              if confirm_token is None and "confirm" in response1.text:
+                  match = re.search(r'confirm=([0-9A-Za-z_-]+)', response1.text)
+                  if match:
+                      confirm_token = match.group(1)
+              
+              # Step 2: Download dengan confirm
+              if confirm_token:
+                  url2 = f"https://drive.google.com/uc?export=download&confirm={confirm_token}&id={file_id}"
+                  response = session.get(url2, headers=headers, stream=True)
+              else:
+                  response = response1
+              
+              # Check content type
+              content_type = response.headers.get('content-type', '')
+              print(f"Content-Type: {content_type}")
+              
+              # Save
+              total_size = 0
+              with open("firmware.zip", "wb") as f:
+                  for chunk in response.iter_content(chunk_size=8192):
+                      if chunk:
+                          f.write(chunk)
+                          total_size += len(chunk)
+              
+              print(f"Downloaded: {total_size} bytes")
+              
+              # Verify not HTML error
+              with open("firmware.zip", "rb") as f:
+                  header = f.read(100)
+                  if b"<html" in header or b"<!DOCTYPE" in header:
+                      print("ERROR: Downloaded HTML error page")
+                      exit(1)
+              
+              if total_size < 1000000:
+                  print("ERROR: File too small")
+                  exit(1)
+                  
+              print("SUCCESS: Method 1 worked")
+              
+          except Exception as e:
+              print(f"FAILED: {e}")
+              exit(1)
+          PYEOF
+
+      - name: Method 2 - Rclone with Service Account
+        if: steps.method1.outcome == 'failure'
+        id: method2
+        continue-on-error: true
+        run: |
+          echo "=== Trying Method 2: Rclone ==="
+          
+          # Install rclone
           curl https://rclone.org/install.sh | sudo bash
-
-      - name: Setup rclone config
-        run: |
-          mkdir -p ~/.config/rclone
           
-          # Buat config rclone dengan service account
+          # Setup config
+          mkdir -p ~/.config/rclone
           cat > ~/.config/rclone/rclone.conf << EOF
           [gdrive]
           type = drive
           scope = drive.readonly
           service_account_file = /tmp/sa.json
           EOF
-
-      - name: Download with rclone
-        run: |
-          FILE_ID="${{ env.FILE_ID }}"
           
-          # Download file by ID menggunakan copyurl (lebih reliable untuk single file)
-          rclone copyurl "https://drive.google.com/uc?id=${FILE_ID}&export=download" firmware.zip -v --auto-filename=false
+          # Try download
+          mkdir -p /tmp/gdrive
+          rclone copy "gdrive:${{ env.FILE_ID }}" /tmp/gdrive -v --drive-export-formats "" --retries 3
           
-          # Cek hasil
-          ls -lh firmware.zip
-
-      - name: Verify download
-        run: |
-          ls -lh firmware.zip || ls -la
-          FILE_SIZE=$(stat -c%s firmware.zip 2>/dev/null || echo 0)
-          if [ "$FILE_SIZE" -lt 1000000 ]; then
-            echo "Error: File too small"
-            exit 1
+          # Check result
+          FILE=$(find /tmp/gdrive -type f -name "*" | head -1)
+          if [ -f "$FILE" ]; then
+              mv "$FILE" firmware.zip
+              SIZE=$(stat -c%s firmware.zip)
+              echo "Downloaded: $SIZE bytes"
+              
+              if [ "$SIZE" -gt 1000000 ]; then
+                  echo "SUCCESS: Method 2 worked"
+              else
+                  echo "FAILED: File too small"
+                  exit 1
+              fi
+          else
+              echo "FAILED: No file downloaded"
+              exit 1
           fi
+
+      - name: Method 3 - Gdown with OAuth Token
+        if: steps.method2.outcome == 'failure'
+        id: method3
+        continue-on-error: true
+        run: |
+          echo "=== Trying Method 3: Gdown with OAuth ==="
+          
+          # Generate token dari service account
+          python3 << 'PYEOF'
+          import json
+          import base64
+          from google.oauth2 import service_account
+          from google.auth.transport.requests import Request
+          
+          sa_b64 = "${{ secrets.GDRIVE_SERVICE_ACCOUNT }}"
+          sa_json = base64.b64decode(sa_b64)
+          sa_data = json.loads(sa_json)
+          
+          credentials = service_account.Credentials.from_service_account_info(
+              sa_data,
+              scopes=['https://www.googleapis.com/auth/drive.readonly']
+          )
+          credentials.refresh(Request())
+          
+          with open('/tmp/token.txt', 'w') as f:
+              f.write(credentials.token)
+          PYEOF
+          
+          # Export token untuk gdown
+          export GDRIVE_ACCESS_TOKEN=$(cat /tmp/token.txt)
+          
+          # Download dengan gdown
+          gdown "${{ env.FILE_ID }}" -O firmware.zip --no-cookies --continue
+          
+          # Verify
+          SIZE=$(stat -c%s firmware.zip 2>/dev/null || echo 0)
+          echo "Downloaded: $SIZE bytes"
+          
+          if [ "$SIZE" -lt 1000000 ]; then
+              echo "FAILED: File too small"
+              exit 1
+          fi
+          
+          echo "SUCCESS: Method 3 worked"
+
+      - name: Method 4 - Pixeldrain Fallback
+        if: steps.method3.outcome == 'failure'
+        id: method4
+        run: |
+          echo "=== Trying Method 4: Pixeldrain ==="
+          
+          PD_ID="${{ github.event.inputs.PIXELDRAIN_ID }}"
+          
+          if [ -z "$PD_ID" ]; then
+              echo "ERROR: No Pixeldrain ID provided"
+              echo "All methods failed. Please provide PIXELDRAIN_ID input."
+              exit 1
+          fi
+          
+          curl -L "https://pixeldrain.com/api/file/${PD_ID}" \
+            -o firmware.zip \
+            --progress-bar \
+            --retry 3 \
+            --retry-delay 5
+          
+          SIZE=$(stat -c%s firmware.zip)
+          echo "Downloaded: $SIZE bytes"
+          
+          if [ "$SIZE" -lt 1000000 ]; then
+              echo "FAILED: Pixeldrain file too small"
+              exit 1
+          fi
+          
+          echo "SUCCESS: Method 4 worked"
+
+      - name: Verify Final Download
+        run: |
+          if [ ! -f firmware.zip ]; then
+              echo "ERROR: No firmware file found"
+              exit 1
+          fi
+          
+          SIZE=$(stat -c%s firmware.zip)
+          echo "Final file size: $SIZE bytes"
+          
+          # Check not HTML
+          if head -c 100 firmware.zip | grep -q "<html\|<!DOCTYPE"; then
+              echo "ERROR: File is HTML, not binary"
+              exit 1
+          fi
+          
           echo "FILENAME=firmware.zip" >> $GITHUB_ENV
+          echo "Download verified successfully!"
 
       - name: Extract firmware with dumpyara
         run: |
@@ -145,5 +329,5 @@ jobs:
         if: always()
         run: |
           rm -f firmware.zip 2>/dev/null || true
-          rm -rf extracted_firmware 2>/dev/null || true
-          rm -f /tmp/lpunpack.py /tmp/sa.json 2>/dev/null || true
+          rm -rf extracted_firmware /tmp/gdrive 2>/dev/null || true
+          rm -f /tmp/lpunpack.py /tmp/sa.json /tmp/token.txt 2>/dev/null || true
