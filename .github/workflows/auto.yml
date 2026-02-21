@@ -31,7 +31,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install system dependencies via apt
+      - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -39,48 +39,76 @@ jobs:
             android-sdk-libsparse-utils \
             p7zip-full \
             liblz4-tool \
-            brotli
+            brotli \
+            curl
 
-      - name: Install lpunpack
+      - name: Download and setup lpunpack.py
         run: |
           curl -L https://raw.githubusercontent.com/unix3dgforce/lpunpack/refs/heads/master/lpunpack.py -o /tmp/lpunpack.py
           chmod +x /tmp/lpunpack.py
-          # Buat symlink agar bisa dipanggil sebagai command
-          sudo ln -s /tmp/lpunpack.py /usr/local/bin/lpunpack
+          sudo ln -sf /tmp/lpunpack.py /usr/local/bin/lpunpack
           # Test
-          lpunpack --help || python3 /tmp/lpunpack.py --help
+          python3 /tmp/lpunpack.py --help | head -3 || true
 
       - name: Install Python packages
         run: |
           pip install aospdtgen dumpyara gdown
 
-      - name: Download firmware from Google Drive
-        id: download
+      - name: Extract File ID and Setup Service Account
+        id: setup
         run: |
           GDRIVE_LINK="${{ github.event.inputs.LINK_GDRIVE }}"
-          echo "Processing link: $GDRIVE_LINK"
           
-          # Extract file ID
+          # Extract File ID
           if [[ $GDRIVE_LINK =~ /file/d/([a-zA-Z0-9_-]+) ]]; then
             FILE_ID="${BASH_REMATCH[1]}"
           elif [[ $GDRIVE_LINK =~ id=([a-zA-Z0-9_-]+) ]]; then
             FILE_ID="${BASH_REMATCH[1]}"
-          elif [[ $GDRIVE_LINK =~ /d/([a-zA-Z0-9_-]+)/ ]]; then
+          elif [[ $GDRIVE_LINK =~ /d/([a-zA-Z0-9_-]+) ]]; then
             FILE_ID="${BASH_REMATCH[1]}"
           else
-            echo "Error: Could not extract file ID"
+            echo "Error: Could not extract file ID from link"
             exit 1
           fi
           
-          echo "FILE_ID=$FILE_ID"
-          gdown "$FILE_ID"
+          echo "FILE_ID=$FILE_ID" >> $GITHUB_ENV
+          echo "File ID: $FILE_ID"
           
-          FILENAME=$(ls -t | head -n1)
-          echo "FILENAME=$FILENAME" >> $GITHUB_ENV
+          # Setup Service Account
+          echo '${{ secrets.GDRIVE_SERVICE_ACCOUNT }}' | base64 -d > /tmp/service_account.json
+          
+          if [ ! -s /tmp/service_account.json ]; then
+            echo "Error: Service account empty or not configured"
+            exit 1
+          fi
+          
+          echo "Service account configured"
+
+      - name: Download firmware with gdown (Service Account)
+        id: download
+        run: |
+          echo "Downloading file ${{ env.FILE_ID }}..."
+          
+          gdown \
+            --service-account-file /tmp/service_account.json \
+            --id "${{ env.FILE_ID }}" \
+            --output firmware.zip
+          
+          # Verify download
+          FILE_SIZE=$(stat -c%s firmware.zip 2>/dev/null || stat -f%z firmware.zip)
+          echo "Downloaded: $FILE_SIZE bytes"
+          
+          if [ "$FILE_SIZE" -lt 1000000 ]; then
+            echo "Error: File too small, possibly quota limit"
+            cat firmware.zip | head -20
+            exit 1
+          fi
+          
+          echo "FILENAME=firmware.zip" >> $GITHUB_ENV
 
       - name: Extract firmware with dumpyara
         run: |
-          python3 -m dumpyara "${{ env.FILENAME }}" -o extracted_firmware
+          python3 -m dumpyara "${{ env.FILENAME }}" -o extracted_firmware -v
 
       - name: Generate device tree with aospdtgen
         run: |
@@ -92,14 +120,16 @@ jobs:
             python -m aospdtgen -o "$OUTPUT" extracted_firmware/
           fi
 
-      - name: Upload artifacts
+      - name: Upload device tree artifact
         uses: actions/upload-artifact@v4
         with:
           name: device-tree-${{ github.run_number }}
           path: ${{ github.event.inputs.OUTPUT_DIR }}/
-          retention-days: 7
+          retention-days: 3
 
       - name: Cleanup
+        if: always()
         run: |
-          rm -f "${{ env.FILENAME }}"
-          rm -rf extracted_firmware
+          rm -f firmware.zip 2>/dev/null || true
+          rm -rf extracted_firmware 2>/dev/null || true
+          rm -f /tmp/lpunpack.py /tmp/service_account.json 2>/dev/null || true
