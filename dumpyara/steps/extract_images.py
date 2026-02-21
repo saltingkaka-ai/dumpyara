@@ -14,9 +14,8 @@ from dumpyara.lib.liberofs import extract_erofs
 from sebaubuntu_libs.libexception import format_exception
 from sebaubuntu_libs.liblogging import LOGD, LOGE, LOGI
 from shutil import copyfile
-from subprocess import CalledProcessError
+from subprocess import CalledProcessError, run
 
-from dumpyara.lib.libsevenzip import unpack_sevenzip
 from dumpyara.utils.bootimg import extract_bootimg
 from dumpyara.utils.partitions import (
 	BOOTIMAGE, FILESYSTEM, RAW,
@@ -45,16 +44,20 @@ def extract_images(raw_images_path: Path, output_path: Path):
 				LOGE(f"Failed to extract {image_path.name}")
 				LOGE(f"{format_exception(e)}")
 		elif partition_type == FILESYSTEM:
+			# Coba erofs dulu
 			try:
 				extract_erofs(image_path, output_path / partition)
 			except CalledProcessError as e:
 				LOGD(f"Failed to extract {image_path.name} with erofs, trying 7z")
 				LOGD(format_exception(e))
+				# Fallback ke 7z hanya jika tersedia
 				try:
+					from dumpyara.lib.libsevenzip import unpack_sevenzip
 					unpack_sevenzip(str(image_path), str(output_path / partition))
-				except CalledProcessError as e:
+				except (CalledProcessError, RuntimeError) as e:
 					LOGE(f"Error extracting {image_path.name}")
-					LOGE(f"{e.output.decode('UTF-8', errors='ignore')}")
+					if hasattr(e, 'output'):
+						LOGE(f"{e.output.decode('UTF-8', errors='ignore')}")
 
 		if partition_type in (RAW, BOOTIMAGE):
 			copyfile(image_path, output_path / f"{partition}.img", follow_symlinks=True)
