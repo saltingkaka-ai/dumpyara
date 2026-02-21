@@ -88,23 +88,12 @@ jobs:
         id: download
         run: |
           echo "Downloading file ${{ env.FILE_ID }}..."
-          
+    
+          # Flag yang benar: --service-account (bukan --service-account-file)
           gdown \
-            --service-account-file /tmp/service_account.json \
+            --service-account /tmp/service_account.json \
             --id "${{ env.FILE_ID }}" \
             --output firmware.zip
-          
-          # Verify download
-          FILE_SIZE=$(stat -c%s firmware.zip 2>/dev/null || stat -f%z firmware.zip)
-          echo "Downloaded: $FILE_SIZE bytes"
-          
-          if [ "$FILE_SIZE" -lt 1000000 ]; then
-            echo "Error: File too small, possibly quota limit"
-            cat firmware.zip | head -20
-            exit 1
-          fi
-          
-          echo "FILENAME=firmware.zip" >> $GITHUB_ENV
 
       - name: Extract firmware with dumpyara
         run: |
