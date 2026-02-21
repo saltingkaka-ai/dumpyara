@@ -1,0 +1,105 @@
+name: Android Firmware Extraction and DT Generation
+
+on:
+  workflow_dispatch:
+    inputs:
+      LINK_GDRIVE:
+        description: 'Google Drive link to firmware file'
+        required: true
+        type: string
+      OUTPUT_DIR:
+        description: 'Output directory name (optional)'
+        required: false
+        default: 'device_tree'
+        type: string
+      NO_PROPRIETARY:
+        description: 'Skip proprietary files extraction'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  extract-and-generate:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies via apt
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            erofs-utils \
+            android-sdk-libsparse-utils \
+            p7zip-full \
+            liblz4-tool \
+            brotli
+
+      - name: Install lpunpack
+        run: |
+          curl -L https://raw.githubusercontent.com/unix3dgforce/lpunpack/refs/heads/master/lpunpack.py -o /tmp/lpunpack.py
+          chmod +x /tmp/lpunpack.py
+          # Buat symlink agar bisa dipanggil sebagai command
+          sudo ln -s /tmp/lpunpack.py /usr/local/bin/lpunpack
+          # Test
+          lpunpack --help || python3 /tmp/lpunpack.py --help
+
+      - name: Install Python packages
+        run: |
+          pip install aospdtgen dumpyara gdown
+
+      - name: Download firmware from Google Drive
+        id: download
+        run: |
+          GDRIVE_LINK="${{ github.event.inputs.LINK_GDRIVE }}"
+          echo "Processing link: $GDRIVE_LINK"
+          
+          # Extract file ID
+          if [[ $GDRIVE_LINK =~ /file/d/([a-zA-Z0-9_-]+) ]]; then
+            FILE_ID="${BASH_REMATCH[1]}"
+          elif [[ $GDRIVE_LINK =~ id=([a-zA-Z0-9_-]+) ]]; then
+            FILE_ID="${BASH_REMATCH[1]}"
+          elif [[ $GDRIVE_LINK =~ /d/([a-zA-Z0-9_-]+)/ ]]; then
+            FILE_ID="${BASH_REMATCH[1]}"
+          else
+            echo "Error: Could not extract file ID"
+            exit 1
+          fi
+          
+          echo "FILE_ID=$FILE_ID"
+          gdown "$FILE_ID"
+          
+          FILENAME=$(ls -t | head -n1)
+          echo "FILENAME=$FILENAME" >> $GITHUB_ENV
+
+      - name: Extract firmware with dumpyara
+        run: |
+          python3 -m dumpyara "${{ env.FILENAME }}" -o extracted_firmware
+
+      - name: Generate device tree with aospdtgen
+        run: |
+          OUTPUT="${{ github.event.inputs.OUTPUT_DIR }}"
+          
+          if [ "${{ github.event.inputs.NO_PROPRIETARY }}" == "true" ]; then
+            python -m aospdtgen --no-proprietary-files -o "$OUTPUT" extracted_firmware/
+          else
+            python -m aospdtgen -o "$OUTPUT" extracted_firmware/
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: device-tree-${{ github.run_number }}
+          path: ${{ github.event.inputs.OUTPUT_DIR }}/
+          retention-days: 7
+
+      - name: Cleanup
+        run: |
+          rm -f "${{ env.FILENAME }}"
+          rm -rf extracted_firmware
