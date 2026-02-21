@@ -84,16 +84,21 @@ jobs:
           
           echo "Service account configured"
 
-      - name: Download firmware with gdown (Service Account)
-        id: download
+      - name: Install gdrive
         run: |
-          echo "Downloading file ${{ env.FILE_ID }}..."
-    
-          # Flag yang benar: --service-account (bukan --service-account-file)
-          gdown \
-            --service-account /tmp/service_account.json \
-            --id "${{ env.FILE_ID }}" \
-            --output firmware.zip
+          wget -q https://github.com/gdrive-org/gdrive/releases/download/2.1.1/gdrive-linux-x64 -O /tmp/gdrive
+          chmod +x /tmp/gdrive
+          sudo mv /tmp/gdrive /usr/local/bin/
+
+      - name: Setup gdrive with Service Account
+        run: |
+          echo '${{ secrets.GDRIVE_SERVICE_ACCOUNT }}' | base64 -d > /tmp/sa.json
+          # gdrive menggunakan environment variable
+          export GOOGLE_SERVICE_ACCOUNT=/tmp/sa.json
+
+      - name: Download with gdrive
+        run: |
+          gdrive download "${{ env.FILE_ID }}" --stdout > firmware.zip
 
       - name: Extract firmware with dumpyara
         run: |
