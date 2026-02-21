@@ -5,7 +5,7 @@
 #
 
 from typing import Callable, Dict
-from liblp.partition_tools.lpunpack import lpunpack
+from liblp.partition_tools.lpunpack import lpunpack as liblp_unpack
 from pathlib import Path
 from re import Pattern, compile
 from sebaubuntu_libs.liblogging import LOGI
@@ -30,22 +30,29 @@ def extract_super(image: Path, output_dir: Path):
 	if unsparsed_super.is_file():
 		unsparsed_super.unlink()
 
-	# Gunakan lpunpack untuk ekstrak super.img
-	LOGI(f"Extracting {image.name} with lpunpack")
+	# Coba lpunpack.py (Python script) dulu
+	LOGI(f"Extracting {image.name} with lpunpack.py")
 	try:
-		# lpunpack otomatis ekstrak semua partisi di dalam super
 		result = run(
-			["lpunpack", str(image), str(output_dir)],
+			["python3", "/usr/local/bin/lpunpack", str(image), str(output_dir)],
 			capture_output=True,
 			text=True
 		)
-		if result.returncode != 0:
-			LOGI(f"lpunpack warning: {result.stderr}")
+		if result.returncode == 0:
+			LOGI(f"Successfully extracted with lpunpack.py")
+			return
+		else:
+			LOGI(f"lpunpack.py failed: {result.stderr}")
 	except Exception as e:
-		LOGI(f"Failed to lpunpack {image.name}: {e}")
-		# Fallback ke liblp jika lpunpack gagal
-		LOGI("Falling back to liblp...")
-		lpunpack(image, output_dir)
+		LOGI(f"lpunpack.py error: {e}")
+
+	# Fallback ke liblp (Python library)
+	LOGI("Falling back to liblp...")
+	try:
+		liblp_unpack(image, output_dir)
+	except Exception as e:
+		LOGI(f"liblp failed: {e}")
+		raise RuntimeError(f"Failed to extract {image.name}")
 
 MULTIPARTITIONS: Dict[Pattern[str], Callable[[Path, Path], None]] = {
 	compile(key): value
