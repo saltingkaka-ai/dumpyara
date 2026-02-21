@@ -17,9 +17,10 @@ from dumpyara.steps.prepare_images import prepare_images
 
 # Package name to package commands
 REQUIRED_TOOLS = {
-	"7-zip or p7zip": [SEVEN_ZIP_EXECUTABLE, P7ZIP_EXECUTABLE],
+	"7-zip or p7zip (optional)": [SEVEN_ZIP_EXECUTABLE, P7ZIP_EXECUTABLE],
 	"erofs-utils": ["fsck.erofs"],
 	"android-sdk-libsparse-utils or platform-utils": ["simg2img"],
+	"lpunpack": ["lpunpack"],  # Tambahkan lpunpack sebagai required
 }
 
 def dumpyara(file: Path, output_path: Path, debug: bool = False):
@@ -34,6 +35,11 @@ def dumpyara(file: Path, output_path: Path, debug: bool = False):
 		installed = any(which(tool) for tool in tools)
 
 		if installed:
+			continue
+
+		# 7z optional, yang lain required
+		if "optional" in package:
+			LOGI(f"Warning: {tools[0]} not found, some features may not work")
 			continue
 
 		raise RuntimeError(
