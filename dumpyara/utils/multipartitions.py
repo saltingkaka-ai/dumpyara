@@ -10,7 +10,7 @@ from pathlib import Path
 from re import Pattern, compile
 from sebaubuntu_libs.liblogging import LOGI
 from shutil import move
-from subprocess import STDOUT, check_output
+from subprocess import STDOUT, check_output, run
 
 from dumpyara.lib.libpayload import extract_android_ota_payload
 
@@ -21,7 +21,7 @@ def extract_super(image: Path, output_dir: Path):
 	unsparsed_super = output_dir / "super.unsparsed.img"
 
 	try:
-		check_output(["simg2img", image, unsparsed_super], stderr=STDOUT) # TODO: Rewrite libsparse...
+		check_output(["simg2img", image, unsparsed_super], stderr=STDOUT)
 	except Exception:
 		LOGI(f"Failed to unsparse {image.name}")
 	else:
@@ -30,7 +30,22 @@ def extract_super(image: Path, output_dir: Path):
 	if unsparsed_super.is_file():
 		unsparsed_super.unlink()
 
-	lpunpack(image, output_dir)
+	# Gunakan lpunpack untuk ekstrak super.img
+	LOGI(f"Extracting {image.name} with lpunpack")
+	try:
+		# lpunpack otomatis ekstrak semua partisi di dalam super
+		result = run(
+			["lpunpack", str(image), str(output_dir)],
+			capture_output=True,
+			text=True
+		)
+		if result.returncode != 0:
+			LOGI(f"lpunpack warning: {result.stderr}")
+	except Exception as e:
+		LOGI(f"Failed to lpunpack {image.name}: {e}")
+		# Fallback ke liblp jika lpunpack gagal
+		LOGI("Falling back to liblp...")
+		lpunpack(image, output_dir)
 
 MULTIPARTITIONS: Dict[Pattern[str], Callable[[Path, Path], None]] = {
 	compile(key): value
