@@ -10,7 +10,7 @@ from pathlib import Path
 from re import Pattern, compile
 from sebaubuntu_libs.liblogging import LOGI
 from shutil import move
-from subprocess import STDOUT, check_output, run
+from subprocess import STDOUT, check_output, run, CalledProcessError
 
 from dumpyara.lib.libpayload import extract_android_ota_payload
 
@@ -20,31 +20,32 @@ def extract_payload(image: Path, output_dir: Path):
 def extract_super(image: Path, output_dir: Path):
 	unsparsed_super = output_dir / "super.unsparsed.img"
 
+	# Unsparse jika perlu
 	try:
 		check_output(["simg2img", image, unsparsed_super], stderr=STDOUT)
 	except Exception:
-		LOGI(f"Failed to unsparse {image.name}")
+		LOGI(f"Failed to unsparse {image.name} or already raw")
 	else:
 		move(unsparsed_super, image)
 
 	if unsparsed_super.is_file():
 		unsparsed_super.unlink()
 
-	# Coba lpunpack.py (Python script) dulu
+	# Coba lpunpack.py dulu (dari workflow)
 	LOGI(f"Extracting {image.name} with lpunpack.py")
 	try:
 		result = run(
 			["python3", "/usr/local/bin/lpunpack", str(image), str(output_dir)],
 			capture_output=True,
-			text=True
+			text=True,
+			check=True
 		)
-		if result.returncode == 0:
-			LOGI(f"Successfully extracted with lpunpack.py")
-			return
-		else:
-			LOGI(f"lpunpack.py failed: {result.stderr}")
-	except Exception as e:
-		LOGI(f"lpunpack.py error: {e}")
+		LOGI(f"Successfully extracted with lpunpack.py")
+		return
+	except (CalledProcessError, FileNotFoundError) as e:
+		LOGI(f"lpunpack.py failed: {e}")
+		if hasattr(e, 'stderr') and e.stderr:
+			LOGI(f"Error output: {e.stderr}")
 
 	# Fallback ke liblp (Python library)
 	LOGI("Falling back to liblp...")
